@@ -8,6 +8,74 @@ import re
 ROLL_PREFIX = 'MCA/'
 # COLUMNS = ['Student Name', ]
 
+# from collections import UserDict
+# """
+# if there is a key "alice" and search for ice it should work if edit distance is less than len('ice')
+# """
+# class FuzzyEditDistanceDict(UserDict):
+#     @staticmethod
+#     def _levenshtein(s1, s2):
+#         """Calculates the minimum edit distance between two strings."""
+#         if len(s1) < len(s2):
+#             return FuzzyEditDistanceDict._levenshtein(s2, s1)
+#         if len(s2) == 0:
+#             return len(s1)
+        
+#         previous_row = range(len(s2) + 1)
+#         for i, c1 in enumerate(s1):
+#             current_row = [i + 1]
+#             for j, c2 in enumerate(s2):
+#                 insertions = previous_row[j + 1] + 1
+#                 deletions = current_row[j] + 1
+#                 substitutions = previous_row[j] + (c1 != c2)
+#                 current_row.append(min(insertions, deletions, substitutions))
+#             previous_row = current_row
+            
+#         return previous_row[-1]
+
+#     def _find_fuzzy_key(self, search_key):
+#         """Finds a key in the dict matching the edit distance rule."""
+#         if not isinstance(search_key, str):
+#             return search_key if search_key in self.data else None
+            
+#         search_len = len(search_key)
+#         if search_len == 0:
+#             return None
+
+#         # Standard exact/case-insensitive match check first for speed
+#         search_lower = search_key.casefold()
+#         for dict_key in self.data:
+#             if isinstance(dict_key, str):
+#                 dict_lower = dict_key.casefold()
+#                 # If exact match exists, return it immediately
+#                 if dict_lower == search_lower:
+#                     return dict_key
+                
+#                 # Otherwise, calculate edit distance
+#                 distance = self._levenshtein(dict_lower, search_lower)
+#                 if distance < search_len:
+#                     return dict_key
+#         return None
+
+#     def __getitem__(self, key):
+#         actual_key = self._find_fuzzy_key(key)
+#         if actual_key is not None:
+#             return self.data[actual_key]
+#         raise KeyError(f"No key matches '{key}' within allowable edit distance.")
+
+#     def __contains__(self, key):
+#         return self._find_fuzzy_key(key) is not None
+
+#     def get(self, key, default=None):
+#         actual_key = self._find_fuzzy_key(key)
+#         return self.data[actual_key] if actual_key is not None else default
+
+# def get_actual_key(self, search_key):
+#     """Returns the actual key stored in the dict that matches the fuzzy search."""
+#     return self._find_fuzzy_key(search_key)
+
+
+
 @st.cache_data
 def extract_info_from_pdf_tables(uploaded_file):
     with pdfplumber.open(uploaded_file) as pdf:
@@ -54,8 +122,16 @@ def extract_info_from_pdf_tables(uploaded_file):
             outcomes_list = mapping_df["Outcomes"].dropna().astype(str).tolist()
             num_pos = sum(1 for item in outcomes_list if "PO" in item and "PSO" not in item)
             num_psos = sum(1 for item in outcomes_list if "PSO" in item)
+
+            # print(mapping_df)
+            mapping_df = mapping_df.transpose()
+            mapping_df.columns = mapping_df.iloc[0]  # First row becomes column names
+            mapping_df = mapping_df.iloc[1:]#.reset_index(drop=True)  # Remove first row
+            # Rename the first column for easier targeting
+            # mapping_df.rename(columns={mapping_df.columns[0]: "Outcomes"}, inplace=True)
+                        
             break
-    mapping_data = {'mapping': mapping_df.transpose(), 'num_POs': num_pos, 'num_PSOs': num_psos}
+    mapping_data = {'mapping': mapping_df, 'num_POs': num_pos, 'num_PSOs': num_psos}
 
     
     # --- 3. Extract Evaluation Methodology ---
@@ -92,6 +168,11 @@ def extract_info_from_pdf_tables(uploaded_file):
             marks_tables_df = pd.DataFrame(marks_tables[2:], columns=marks_tables[0])
             marks_tables_df = marks_tables_df.dropna(axis=1, how='all')
             marks_tables_df = marks_tables_df.loc[:, marks_tables_df.columns.notna()]
+
+            marks_tables_df = marks_tables_df.drop(columns=marks_tables_df.filter(like='Total').columns)
+            marks_tables_df = marks_tables_df.drop(columns=marks_tables_df.filter(like='Attendance').columns)
+            marks_tables_df = marks_tables_df.drop(columns=marks_tables_df.filter(like='Seat No.').columns)
+
             break
 
         if flag_continued and ROLL_PREFIX in str(table[0][0]):
@@ -144,10 +225,9 @@ def extract_info_from_pdf_tables(uploaded_file):
 
             flag_continued = True
 
-    print(marks_tables_df)
+    # print(marks_tables_df)
     
     return course_info, mapping_data, eval_df, marks_tables_df
-
 
 
 @st.cache_data
@@ -186,117 +266,385 @@ def get_end_sem_marks_from_xls(xls_file):
     end_sem_df.columns = unique_headers
 
     end_sem_df = end_sem_df.drop(columns=end_sem_df.filter(like='Discard_').columns)
+    end_sem_df = end_sem_df.drop(columns=end_sem_df.filter(like='Total').columns)
 
     return end_sem_df
 
+def display_CO_PO_mapping_data(mapping_data):
+    st.success(f"**Number of POs:** {mapping_data['num_POs']} | **Number of PSOs:** {mapping_data['num_PSOs']}")
+    if mapping_data['mapping'] is not None:
+        show_table = st.toggle("Show Mapping table", value=False)
+        if show_table:
+            view = st.segmented_control(
+                "Display mode",
+                options=["Default", "Only numerics", "Only texts"],
+                default="Default",
+                label_visibility="collapsed",
+            )
 
-
-
-
-
-st.title("CO-PO Attainment Calculator")
-# st.title("CO-PO Attainment Calculator: Data Ingestion")
-
-# File upload widget
-uploaded_file = st.file_uploader("Upload Course File (PDF)", type="pdf")
-
-if uploaded_file is not None:
-    with st.spinner("Extracting tables..."):
-        # Force a quick frontend refresh so the spinner renders
-        time.sleep(0.1) 
+            mapping_display_df = mapping_data['mapping']
+            # print(mapping_display_df)
+            if view == "Only numerics":
+                mapping_display_df = mapping_display_df.replace(r'\D+', '', regex=True).astype(int)
+            elif view == "Only texts":
+                mapping_display_df = mapping_display_df.replace(r'\s*\(\d+\)', '', regex=True)
         
+            st.dataframe(mapping_display_df, width="stretch")
+    else:
+        st.warning("Could not locate the CO-PO Mapping table.")
+        st.stop()
 
-        course_info, mapping_data, eval_df, marks_tables_df = extract_info_from_pdf_tables(uploaded_file)
+def display_end_sem_data(xls_file):
+    # extract_info_from_xls()
+    
+    end_sem_df = get_end_sem_marks_from_xls(xls_file)
+    
+
+    
+    # # Preview to confirm
+    # st.dataframe(end_sem_df)
+
+
+    
+    # # Use regex to find all question columns formatted as "Number.Number" (e.g., 1.1, 1.2, 2.1)
+    # question_cols = [col for col in end_sem_df.columns if re.match(r'^\d+\.\d+$', str(col))]
+    
+    # # Find the student identifier column (assuming it's named something like 'Roll No')
+    # id_cols = [col for col in end_sem_df.columns if 'roll' in str(col).lower()]
+    
+    # if id_cols and question_cols:
+    if not end_sem_df.empty:
+        # Combine the ID column(s) with the question columns
+        # cols_to_keep = id_cols + question_cols
+        # filtered_end_sem_df = end_sem_df[cols_to_keep]
+        filtered_end_sem_df = end_sem_df
         
+        st.success(f"Successfully extracted marks for {len(filtered_end_sem_df)} students.")
+        show_table_end_sem = st.toggle("Show Mapping table", value=False, key='end_sem_marks')
+        if show_table_end_sem:
+            st.dataframe(filtered_end_sem_df, width="stretch", hide_index=True)
+    else:
+        st.warning("Could not find the Roll No column or the question columns (1.1, 1.2, etc.) in the uploaded Excel file.")
+        st.stop()
 
-        
 
-        
+    # sanity check
+    # filtered_end_sem_df['Roll No']
+    # marks_tables_df['Roll No.']
+    return filtered_end_sem_df
 
-        # --- Display Results ---
-        st.header("1. Course Information")
-        st.json(course_info)
+marks_dict = {  'Assignment': 10,
+                'Seminar'   : 10,
+                'Quiz'      : 10,
+                # '(5.0)'     : 5
+            }
 
-        st.header("2. CO-PO/PSO Mapping")
-        st.write(f"**Number of POs:** {mapping_data['num_POs']} | **Number of PSOs:** {mapping_data['num_PSOs']}")
-        if mapping_data['mapping'] is not None:
-            st.dataframe(mapping_data['mapping'], use_container_width=True)
-        else:
-            st.warning("Could not locate the CO-PO Mapping table.")
+def question_wise_CO_input(eval_items, COs, key):
+    # eval_items = ["Quiz 1", "Quiz 2", "Quiz 3", "Assignment", "Seminar"]
+    # COs = ["CO1", "CO2", "CO3", "CO4", "CO5"]
 
-        # st.header("3. Evaluation Methodology")
-        # if eval_df is not None:
-        #     st.dataframe(eval_df, use_container_width=True, hide_index=True)
+    data = {}
+
+    cols = st.columns(len(eval_items))
+
+    for col, item in zip(cols, eval_items):
+        with col:
+            with st.expander(item, expanded=False):
+                full_marks = st.number_input(
+                    "Enter Max Mark",
+                    min_value=0,
+                    max_value=100,
+                    value=next((marks_dict[key] for key in marks_dict if key in item), 5),
+                    step=5,
+                    key=f"{item}_fm"
+                )
+
+                data[item] = {'fm': full_marks}
+
+                selected_COs = st.multiselect(
+                    "Select COs",
+                    COs,
+                    key=f"{key}_{item}",
+                    label_visibility="collapsed",
+                    placeholder="Select course outcomes..."
+                )
+
+
+                # Recalculate weights when the selection changes
+                num_cos = len(selected_COs)
+                default_weight = 100.0 / num_cos if num_cos else 0.0
+
+                # Track the previous selection
+                selection_key = f"{key}_{item}_previous_selection"
+                previous_selection = st.session_state.get(selection_key, [])
+
+                if set(selected_COs) != set(previous_selection):
+                    for co in selected_COs:
+                        weight_key = f"{key}_{item}_{co}"
+                        st.session_state[weight_key] = default_weight
+
+                    st.session_state[selection_key] = selected_COs.copy()
+
+                if selected_COs:
+                    selected_COs = sorted(selected_COs)
+                    # cols = st.columns(len(selected_COs))
+
+                    # for col, co in zip(cols, selected_COs):
+                    #     with col:
+                    for co in selected_COs:
+                            weight = st.number_input(
+                                f"{co} (%)",
+                                min_value=0.0,
+                                max_value=100.0,
+                                value=default_weight,
+                                step=5.0,
+                                key=f"{key}_{item}_{co}"
+                            )
+
+                            data[item][co] = weight
+    return data
+
+def check_and_display_question_wise_CO_input(data):
+    errors = []
+
+    total_fm = 0
+    for item in data:
+        total_CO_weight = sum(data[item].values()) - data[item]['fm']
+        total_fm += data[item]['fm']
+
+        if data[item] and abs(total_CO_weight - 100.0) > 0.01:
+            errors.append(f"{item}: Total CO weightage is {total_CO_weight:.2f}%, expected 100%.")
+
+        elif not data[item]:
+            errors.append(f"{item}: Please select at least one CO.")
+
+    if total_fm != 100:
+        errors.append(f"Total marks is {total_fm:.2f}%, expected 100.")
+
+    if errors:
+        for error in errors:
+            st.error(error)
+            # st.stop()
+    else:
+        st.success("CO Mapping saved successfully!")
+        # show_json = st.toggle("Show JSON", value=False)
+        # if show_json:
+        st.json(data, expanded=False)
         # else:
-        #     st.warning("Could not locate the Evaluation Methodology table.")
+        #     df = pd.DataFrame.from_dict(data, orient="index")
+        #     df.index.name = "Eval Item"
+        #     df = df.fillna(0).astype(int)
+        #     st.dataframe(df, width='stretch')
+        return data
+    # else:
+    #     st.stop()
 
-        # --- Display Marks Results ---
-        st.header("4. Internal Marks (Evaluation Sheet)")
-        if not marks_tables_df.empty:
-            # Combine the tables from multiple pages into one continuous dataframe
-            # final_marks_df = pd.concat(marks_tables, ignore_index=True)
-            final_marks_df = marks_tables_df
+
+def gen_front_end():
+    st.set_page_config(
+        page_title="CO-PO Attainment Calculator",
+        page_icon="📚",
+        layout="wide"
+    )
+
+    st.logo(
+        "BIT_logo.png",  # Can be a file path, URL, or emoji
+        size="large",  # Options: "small", "medium", "large"
+        # link="https://your-website.com",  # Optional redirect URL when clicked
+        # icon_image="path/to/icon.png",  # Smaller image when sidebar is collapsed
+    )
+
+    st.title("CO-PO Attainment Calculator")
+    # st.title("CO-PO Attainment Calculator: Data Ingestion")
+
+    # File upload widget
+    uploaded_file = st.file_uploader("Upload Course File (PDF)", type="pdf")
+
+    if uploaded_file is not None:
+        with st.spinner("Extracting tables..."):
+            # Force a quick frontend refresh so the spinner renders
+            time.sleep(0.1) 
             
-            # Display how many records were extracted
-            st.success(f"Successfully extracted {len(final_marks_df)} student records.")
+
+            course_info, mapping_data, eval_df, marks_tables_df = extract_info_from_pdf_tables(uploaded_file)
             
-            # Show the dataframe in the Streamlit app
-            st.dataframe(final_marks_df, use_container_width=True, hide_index=True)
-        else:
-            st.warning("Could not locate the Evaluation Sheet / Marks tables.")
+
+            # --- Display Results ---
+            st.header(f"{display_item_counter.count}. Course Information")
+            st.json(course_info)
+
+            st.header(f"{display_item_counter.count}. CO-PO/PSO Mapping")
+            display_CO_PO_mapping_data(mapping_data)
+
+            # st.header("3. Evaluation Methodology")
+            # if eval_df is not None:
+            #     st.dataframe(eval_df, width="stretch", hide_index=True)
+            # else:
+            #     st.warning("Could not locate the Evaluation Methodology table.")
+
+            # --- Display Marks Results ---
+            st.header(f"{display_item_counter.count}. Internal Marks (Evaluation Sheet)")
+            if not marks_tables_df.empty:
+                # Combine the tables from multiple pages into one continuous dataframe
+                # final_internal_marks_df = pd.concat(marks_tables, ignore_index=True)
+                final_internal_marks_df = marks_tables_df
+                
+                # Display how many records were extracted
+                st.success(f"Successfully extracted {len(final_internal_marks_df)} student records.")
+                
+                show_table_internal = st.toggle("Show Mapping table", value=False, key='internal_marks')
+                if show_table_internal:
+                    st.dataframe(final_internal_marks_df, width="stretch", hide_index=True)
+            else:
+                st.warning("Could not locate the Evaluation Sheet / Marks tables.")
+                st.stop()
+    else:
+        st.stop()
 
 
-
-        # --- 5. Extract End-Semester Marks from XLS ---
-        st.header("5. End Semester Marks (XLS)")
-
-        # extract_info_from_xls()
-        xls_file = st.file_uploader("Upload End Sem Marks (XLS/XLSX)", type=["xls", "xlsx"])
+    # --- Extract End-Semester Marks from XLS ---
+    st.header(f"{display_item_counter.count}. End Semester Marks (XLS)")
+    xls_file = st.file_uploader("Upload End Sem Marks (XLS/XLSX)", type=["xls", "xlsx"])
         
-        if xls_file is not None:
-            # Read the Excel file
-            with st.spinner("Extracting tables..."):
-                time.sleep(0.1)
-                end_sem_df = get_end_sem_marks_from_xls(xls_file)
-                
+    if xls_file is not None:
+        # Read the Excel file
+        with st.spinner("Extracting tables..."):
+            time.sleep(0.1)
+            filtered_end_sem_df = display_end_sem_data(xls_file)
 
-                
-                # # Preview to confirm
-                # st.dataframe(end_sem_df)
+            st.header(f"{display_item_counter.count}. Comparing Internal and EndSem Roll List")
+            diff_df1 = filtered_end_sem_df[~filtered_end_sem_df['Roll No'].isin(marks_tables_df['Roll No.'])]
+            diff_df2 = marks_tables_df[~marks_tables_df['Roll No.'].isin(filtered_end_sem_df['Roll No'])]
+            if not diff_df1.empty or not diff_df2.empty:
+                # print(diff_df1)
+                # print(diff_df2)
+                st.warning('Mismatch found')
+                st.dataframe(diff_df1, width="stretch", hide_index=True)
+                st.dataframe(diff_df2, width="stretch", hide_index=True)
+                st.stop()
+            else:
+                st.success(f"Successfully matched rolls for all {len(filtered_end_sem_df)} students.")
+    else:
+        st.stop()
+
+    st.header(f"{display_item_counter.count}. Question-wise CO Mapping")
+
+    CO_names = sorted(mapping_data['mapping'].index.tolist())
+
+    st.subheader("Internal Marks")
+    eval_items = final_internal_marks_df.columns.delete([0, 1])
+    internal_Q_CO = question_wise_CO_input(eval_items, CO_names, 'internal_Q_CO')
+    # if not internal_Q_CO:
+    #     st.stop()
 
 
+    st.subheader("End Sem Marks")
+    eval_items = filtered_end_sem_df.columns.delete([0, 1, 2])
+    end_sem_Q_CO1 = question_wise_CO_input(eval_items[:6], CO_names, 'end_sem_Q_CO')
+    end_sem_Q_CO2 = question_wise_CO_input(eval_items[6:], CO_names, 'end_sem_Q_CO')
+    end_sem_Q_CO = end_sem_Q_CO1 | end_sem_Q_CO2
+    # if not end_sem_Q_CO:
+    #     st.stop()
+    
+
+    if st.button("Save", type="primary", width='stretch'):
+        Q_CO = internal_Q_CO | end_sem_Q_CO
+        st.session_state.Q_CO = check_and_display_question_wise_CO_input(Q_CO)
+
+    if "Q_CO" in st.session_state:
+        # calculate weighted sum
+        st.header(f"{display_item_counter.count}. Student CO Attainment")
+        
+        # Q_CO = st.session_state.Q_CO
+        
+        with st.spinner("Calculating CO Attainment..."):
+            time.sleep(0.1) # UI refresh
+            
+            # 1. Standardize and merge the two dataframes on Roll No
+            # The internal marks dataframe uses 'Roll No.' while end sem uses 'Roll No'
+            internal_df = final_internal_marks_df.rename(columns={'Roll No.': 'Roll No'})
+            
+            # Drop extra identifier columns from the end sem dataframe to avoid duplicates after merge
+            end_sem_clean = filtered_end_sem_df.drop(columns=['Sr no. ', 'Student Name'], errors='ignore')
+            
+            # Inner join guarantees we only calculate for students present in both sheets
+            combined_df = pd.merge(internal_df, end_sem_clean, on='Roll No', how='inner')
+            
+            # Convert mark columns to numeric, replacing absentees or parsing errors with 0
+            mark_cols = list(Q_CO.keys())
+            for col in mark_cols:
+                if col in combined_df.columns:
+                    combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').fillna(0)
+
+            # 2. Calculate the Maximum Possible Marks for each CO across the entire assessment
+            co_max_marks = {co: 0.0 for co in CO_names}
+            for question, data in Q_CO.items():
+                fm = data.get('fm', None)
+                # fm = data.get('fm', 0)
+                for key, value in data.items():
+                    if key in CO_names:
+                        # Add the proportional full marks allocated to this CO
+                        co_max_marks[key] += fm * (value / 100.0)
+
+            # 3. Calculate obtained marks and percentages for each student
+            attainment_df = combined_df[['Roll No', 'Student Name']].copy()
+            
+            for co in CO_names:
+                obtained_col = f"{co} (Obtained)"
+                percent_col = f"{co} (%)"
+                attainment_df[obtained_col] = 0.0
                 
-                # # Use regex to find all question columns formatted as "Number.Number" (e.g., 1.1, 1.2, 2.1)
-                # question_cols = [col for col in end_sem_df.columns if re.match(r'^\d+\.\d+$', str(col))]
+                # Sum the weighted marks obtained in each question for the current CO
+                for question, data in Q_CO.items():
+                    if co in data and question in combined_df.columns:
+                        weight = data[co] / 100.0
+                        attainment_df[obtained_col] += combined_df[question] * weight
                 
-                # # Find the student identifier column (assuming it's named something like 'Roll No')
-                # id_cols = [col for col in end_sem_df.columns if 'roll' in str(col).lower()]
-                
-                # if id_cols and question_cols:
-                if not end_sem_df.empty:
-                    # Combine the ID column(s) with the question columns
-                    # cols_to_keep = id_cols + question_cols
-                    # filtered_end_sem_df = end_sem_df[cols_to_keep]
-                    filtered_end_sem_df = end_sem_df
+                # Convert to percentage relative to the maximum possible marks for this CO
+                if co_max_marks[co] > 0:
+                    attainment_df[percent_col] = (attainment_df[obtained_col] / co_max_marks[co]) * 100
+                else:
+                    attainment_df[percent_col] = 0.0
                     
-                    st.success(f"Successfully extracted marks for {len(filtered_end_sem_df)} students.")
-                    st.dataframe(filtered_end_sem_df, use_container_width=True, hide_index=True)
-                else:
-                    st.warning("Could not find the Roll No column or the question columns (1.1, 1.2, etc.) in the uploaded Excel file.")
+                # Round percentages for cleaner display
+                attainment_df[percent_col] = attainment_df[percent_col].round(2)
+
+            st.success("Successfully calculated individual CO attainment for all matched students.")
+            
+            # Display Max Marks Reference
+            with st.expander("View Max Marks breakdown per CO", expanded=False):
+                st.json(co_max_marks)
+
+            # Render the final calculated DataFrame
+            st.dataframe(attainment_df, width="stretch", hide_index=True)
+            
+            # Provide a download button for the generated attainment data
+            csv = attainment_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download CO Attainment Report (CSV)",
+                data=csv,
+                file_name='Student_CO_Attainment.csv',
+                mime='text/csv',
+                type="primary",
+                use_container_width=True
+            )
+        
+
+class Counter:
+    def __init__(self):
+        self._count = 0
+
+    @property
+    def count(self):
+        self._count += 1
+        return self._count
+
+display_item_counter = Counter()
+gen_front_end()
 
 
-                # sanity check
-                # filtered_end_sem_df['Roll No']
-                # marks_tables_df['Roll No.']
+# df.iloc[:, 1:] = df.iloc[:, 1:].replace(r'\D+', '', regex=True).astype(int)
 
-                diff_df1 = filtered_end_sem_df[~filtered_end_sem_df['Roll No'].isin(marks_tables_df['Roll No.'])]
-                diff_df2 = marks_tables_df[~marks_tables_df['Roll No.'].isin(filtered_end_sem_df['Roll No'])]
-                if not diff_df1.empty or not diff_df2.empty:
-                    # print(diff_df1)
-                    # print(diff_df2)
-                    st.warning('Mismatch found')
-                    st.dataframe(diff_df1, use_container_width=True, hide_index=True)
-                    st.dataframe(diff_df2, use_container_width=True, hide_index=True)
-                else:
-                    st.success(f"Successfully matched rolls for all {len(filtered_end_sem_df)} students.")
-
+# i have question wise full marks, co weightage, i want find weigthed avg for each co
+# python, weights and full marks is in JSON
+# obtained marks in dataframe
