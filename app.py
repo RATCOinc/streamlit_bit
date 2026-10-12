@@ -6,6 +6,7 @@ import re
 import json
 # import plotly.graph_objects as go
 import plotly.express as px
+from io import StringIO
 
 
 ROLL_PREFIX = 'MCA/'
@@ -275,26 +276,71 @@ def get_end_sem_marks_from_xls(xls_file):
 
     return end_sem_df
 
-def display_CO_PO_mapping_data(mapping_data):
-    st.success(f"**Number of POs:** {mapping_data['num_POs']} | **Number of PSOs:** {mapping_data['num_PSOs']}")
+def process_CO_PO_mapping_data(mapping_data, final_attainment_per_CO):
+    st.success(f"Parsed from course file: **Number of POs:** {mapping_data['num_POs']} | **Number of PSOs:** {mapping_data['num_PSOs']}")
     if mapping_data['mapping'] is not None:
-        show_table = st.toggle("Show Mapping table", value=False)
-        if show_table:
-            view = st.segmented_control(
-                "Display mode",
-                options=["Default", "Only numerics", "Only texts"],
-                default="Default",
-                label_visibility="collapsed",
-            )
+        # show_table = st.toggle("Show Mapping table", value=False)
+        # if show_table:
+        #     view = st.segmented_control(
+        #         "Display mode",
+        #         options=["Default", "Only numerics", "Only texts"],
+        #         default="Default",
+        #         label_visibility="collapsed",
+        #     )
 
-            mapping_display_df = mapping_data['mapping']
-            # print(mapping_display_df)
-            if view == "Only numerics":
-                mapping_display_df = mapping_display_df.replace(r'\D+', '', regex=True).astype(int)
-            elif view == "Only texts":
-                mapping_display_df = mapping_display_df.replace(r'\s*\(\d+\)', '', regex=True)
+        #     mapping_display_df = mapping_data['mapping'].replace(r'^\s*-\s*$|^\s*$', pd.NA, regex=True)
+
+        #     # print(mapping_display_df)
+        #     if view == "Only numerics":
+        #         mapping_display_df = mapping_display_df.replace(r'\D+', '', regex=True).astype(float)
+        #     elif view == "Only texts":
+        #         mapping_display_df = mapping_display_df.replace(r'\s*\(\d+\)', '', regex=True)
         
-            st.dataframe(mapping_display_df, width="stretch")
+        #     st.dataframe(mapping_display_df, width="stretch")
+        
+        mapping_display_df = mapping_data['mapping'].replace(r'^\s*-\s*$|^\s*$', pd.NA, regex=True)
+        st.subheader("Override parsed table?")
+        st.text("Paste your mapping table in the text-area below then click outside (or press Tab)")
+        # st.markdown("Paste your mapping table in the text-area below")
+        text = st.text_area('Paste numerical values with column headers (PO1, ...) in tsv/csv format')#"copy from excel and paste here")
+        if text.strip():
+            mapping_df = pd.read_csv(StringIO(text), sep=None)
+            if len(mapping_df) != len(mapping_display_df):
+                st.error("Length mismatch; did not update")
+            else:
+                mapping_df.index = mapping_display_df.index
+                mapping_display_df = mapping_df.replace({
+                    3: "High (3)",
+                    2: "Medium (2)",
+                    1: "Low (1)"
+                })
+                st.success("Successfully replaced the mapping table")
+        
+        st.dataframe(mapping_display_df, width='stretch')
+
+        mapping_display_df_numeric = mapping_display_df.replace(r'\D+', '', regex=True).astype(float)
+        
+
+
+        # mapping_display_df_numeric = mapping_display_df_numeric.set_index("CO")
+        # final_attainment_per_CO = final_attainment_per_CO.set_index("CO")["Attainment"]
+
+        # # Match CO order
+        # final_attainment_per_CO = final_attainment_per_CO.reindex(mapping_display_df_numeric.index)
+
+        # Dot product: PO-wise weighted sums
+        # po_scores = mapping_display_df_numeric.T.dot(final_attainment_per_CO)
+
+        po_scores = mapping_display_df_numeric.fillna(0).T.dot(final_attainment_per_CO.iloc[0]).to_frame().T
+        po_scores.index = ['Fin']
+
+        # print('rathin', mapping_display_df_numeric)
+        # print(final_attainment_per_CO)
+
+        if not po_scores.empty:
+            st.success("PO Attainments calculated successfully")
+            st.dataframe(po_scores, width='stretch')
+        
     else:
         st.warning("Could not locate the CO-PO Mapping table.")
         st.stop()
@@ -521,160 +567,213 @@ def plot_attainment_gap(df_attainment, df_target):
 # some features are hardcoded as per the current data
 # TODO: make it universal
 # """
-def calculate_CO_attainment(Q_CO, final_internal_marks_df, filtered_end_sem_df):
-    internal_df = final_internal_marks_df.rename(columns={'Roll No.': 'Roll No'})
 
-    # Drop extra identifier columns from the end sem dataframe to avoid duplicates after merge
-    end_sem_clean = filtered_end_sem_df.drop(columns=['Sr no. ', 'Student Name'], errors='ignore')
 
-    # Inner join guarantees we only calculate for students present in both sheets
-    combined_marks_df = pd.merge(internal_df, end_sem_clean, on='Roll No', how='inner')
-
+def calculate_CO_attainment_separately(Q_CO, marks_df, attainment_bins, attainment_bins_labels):
+    # print(Q_CO)
+    # print(marks_df)
     Q_CO_df = pd.DataFrame(Q_CO)
     Q_fm_df = Q_CO_df[:1]
     Q_CO_df = (Q_CO_df[1:].fillna(0) / 100).sort_index()
 
-    # Student details
-    student_details = combined_marks_df[['Roll No', 'Student Name']]
-
-    # Assessment columns common to both DataFrames
-    assessment_cols = Q_CO_df.columns.intersection(combined_marks_df.columns).sort_values()
-    # print("****", Q_CO_df.index)
-
-    # Student assessment marks
-    obtained_marks_df = combined_marks_df[assessment_cols].apply(
+    student_details = marks_df[['Roll No']]
+    assessment_cols = Q_CO_df.columns.sort_values()
+    obtained_marks_df = marks_df[assessment_cols].apply(
         pd.to_numeric, errors='coerce'
     )
-
-    # CO weights for the same assessments
     CO_weights = Q_CO_df[assessment_cols]
-    # print(CO_weights)
+    # print('*****', CO_weights)
 
     # Calculate weighted marks for each student for each CO
     co_marks = obtained_marks_df.dot(CO_weights.T)
-    # print(co_marks)
-
-    # Add student details
-    CO_students = pd.concat([student_details, co_marks], axis=1)
-
-    st.success("Successfully calculated individual CO attainment for all matched students")
-
-    st.caption("Attainment Grading Scale")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        bin1 = st.number_input("Lower bound", value=0, disabled=True)
-    with col2:
-        bin2 = st.number_input("Medium lower bound", value=45, step=5)
-    with col3:
-        bin3 = st.number_input("High lower bound", value=65, step=5)
-    with col4:
-        bin4 = st.number_input("Upper bound", value=100, disabled=True)
-
-    state = st.toggle("Show calculated marks per CO table", value=False)
-    if state:
-        st.dataframe(CO_students)
+    # print("**", co_marks)
 
     weighted_fm_per_CO = Q_fm_df.dot(CO_weights.T)
     # print(weighted_fm_per_CO)
+    # avg_obtained_per_CO = co_marks.mean(numeric_only=True, axis=0).to_frame().T
+    # # print(avg_obtained_per_CO)
+    # attainment_per_CO = avg_obtained_per_CO.div(weighted_fm_per_CO.iloc[0])
+    # print(attainment_per_CO)
+    # st.caption("Average Attainment % over all students")
+    # st.dataframe(attainment_per_CO * 100, hide_index=True, width='content')
 
-    # co_columns_config = {col: st.column_config.Column(alignment="center") for col in weighted_fm_per_CO.columns}
+    attainment_per_CO_per_student = co_marks.div(weighted_fm_per_CO.iloc[0]) * 100
+    attainment_per_CO = attainment_per_CO_per_student.mean(numeric_only=True, axis=0).to_frame().T
+    # print("rathin", attainment_per_CO_per_student)
 
-    # st.dataframe(weighted_fm_per_CO, hide_index=True, width='content')
-
-    avg_obtained_per_CO = co_marks.mean(numeric_only=True, axis=0).to_frame().T
-    # st.dataframe(avg_obtained_per_CO, hide_index=True, width='content')
-
-    attainment_per_CO = avg_obtained_per_CO.div(weighted_fm_per_CO.iloc[0])
-    # print(attainment_df)
-    
-    
-    # st.dataframe(weighted_fm_per_CO, hide_index=True, width='content')
-    # st.dataframe(avg_obtained_per_CO, hide_index=True, width='content')
-    st.caption("Average Attainment % over all students")
-    st.dataframe(attainment_per_CO * 100, hide_index=True, width='content')
-
-
-    st.caption("Average Attainment level over all students")
-
-    
-    bins = [-1.0, bin2/100.0, bin3/100.0, 1.01]
-    labels = [1, 2, 3]  # Low=1, Medium=2, High=3
-
-    bucketed_marks_per_CO = co_marks.div(weighted_fm_per_CO.iloc[0]).apply(
+    bucketed_marks_per_CO = attainment_per_CO_per_student.apply(
         lambda col: pd.cut(
             col,
-            bins=bins,
-            labels=labels,
+            bins=attainment_bins,
+            labels=attainment_bins_labels,
             right=False
         ).astype(int)
     )
     avg_bucketed_marks_per_CO = bucketed_marks_per_CO.mean(numeric_only=True, axis=0).to_frame().T
-    st.dataframe(avg_bucketed_marks_per_CO, hide_index=True, width='content')
 
-
-    st.subheader("Evaluation of attainment target")
-    # Number of students who have attained more than the target (60%)
-    attainment_target = st.number_input(label="Attainment Target", min_value=10, value=60, max_value=100, step=5)
-
-    target_df = attainment_per_CO.copy()
-    target_df[:] = attainment_target
-    plot_attainment_gap(attainment_per_CO * 100, target_df)
-
-
-    st.header(f"{display_item_counter.count}. Checking if CO has been attained or not and for Modifying the Target of each CO for future")
-    st.caption("[This calculation is purely based on Direct Assessment]")
-
-    target_co_marks_tmp = co_marks.div(weighted_fm_per_CO.iloc[0]) * 100
-    target_marks_achieved_per_CO = (target_co_marks_tmp >= attainment_target).sum().to_frame().T
-    # print()
-    total_students = len(target_co_marks_tmp)
-    st.caption(f"P = Number of students who have scored more than the target ({attainment_target}%)")
-    st.dataframe(target_marks_achieved_per_CO, hide_index=True, width='content')
-
-    # print(total_students)
-    target_marks_achieved_per_CO_percentage = target_marks_achieved_per_CO / total_students * 100
-    st.caption("Percentage of students who have achieved the target = (P/total_students)*100")
-    st.dataframe(target_marks_achieved_per_CO_percentage, hide_index=True, width='content')
-
-    st.caption(f"Attainment Level (3 for >{attainment_target+20}%, 2 for >{attainment_target+10}%, 1 for> {attainment_target}%)")
-    target_attainment_level_bins = [0, attainment_target, attainment_target+10, attainment_target+20, 1000]
-    # print(target_marks_achieved_per_CO_percentage)
-    bucketed_target_marks_achieved_per_CO = target_marks_achieved_per_CO_percentage.apply(
-        lambda col: pd.cut(
-            col,
-            bins=target_attainment_level_bins,
-            labels=[0, 1, 2, 3],
-            right=False
-        ).astype(int)
-    )
-    st.dataframe(bucketed_target_marks_achieved_per_CO, hide_index=True, width='content')
-
-
-    st.header(f"{display_item_counter.count}. Final Attainment for each Course")
-    st.caption("Enter Student feedback from ERP for Indirect CO Attainment")
-    indirect_CO_st_cols = st.columns(5)
-    feedback = {}
-    CO_names = avg_bucketed_marks_per_CO.columns
-    for i, col in enumerate(indirect_CO_st_cols, start=1):
-        with col:
-            feedback[CO_names[i-1]] = st.number_input(
-                CO_names[i-1],
-                min_value=0.0,
-                max_value=5.0,
-                value=2.5,
-                step=0.25,
-                key=f"student_feedback_{CO_names[i-1]}"
-            )
-
-    feedback_df = pd.DataFrame(feedback, index=[0])
-    final_attainment = avg_bucketed_marks_per_CO * 0.7 + feedback_df * 0.3
-
-    # CO Attainment Level=70%*A+30%*B
-    st.caption("Final Attainment Level: 70% * direct + 30% indirect")
-    st.dataframe(final_attainment, hide_index=True, width='content')
     
-    # return True
-    st.session_state.CO_attainment = True
+
+    # return attainment_per_CO_per_student, avg_bucketed_marks_per_CO
+    return attainment_per_CO, avg_bucketed_marks_per_CO, attainment_per_CO_per_student
+
+    
+
+
+
+# def calculate_CO_attainment(Q_CO, final_internal_marks_df, filtered_end_sem_df):
+#     internal_df = final_internal_marks_df.rename(columns={'Roll No.': 'Roll No'})
+
+#     # Drop extra identifier columns from the end sem dataframe to avoid duplicates after merge
+#     end_sem_clean = filtered_end_sem_df.drop(columns=['Sr no. ', 'Student Name'], errors='ignore')
+
+#     # Inner join guarantees we only calculate for students present in both sheets
+#     combined_marks_df = pd.merge(internal_df, end_sem_clean, on='Roll No', how='inner')
+
+#     Q_CO_df = pd.DataFrame(Q_CO)
+#     Q_fm_df = Q_CO_df[:1]
+#     Q_CO_df = (Q_CO_df[1:].fillna(0) / 100).sort_index()
+
+#     # Student details
+#     student_details = combined_marks_df[['Roll No', 'Student Name']]
+
+#     # Assessment columns common to both DataFrames
+#     assessment_cols = Q_CO_df.columns.intersection(combined_marks_df.columns).sort_values()
+#     # print("****", Q_CO_df.index)
+
+#     # Student assessment marks
+#     obtained_marks_df = combined_marks_df[assessment_cols].apply(
+#         pd.to_numeric, errors='coerce'
+#     )
+
+#     # CO weights for the same assessments
+#     CO_weights = Q_CO_df[assessment_cols]
+#     # print(CO_weights)
+
+#     # Calculate weighted marks for each student for each CO
+#     co_marks = obtained_marks_df.dot(CO_weights.T)
+#     # print(co_marks)
+
+#     # Add student details
+#     CO_students = pd.concat([student_details, co_marks], axis=1)
+
+#     st.success("Successfully calculated individual CO attainment for all matched students")
+
+#     st.caption("Attainment Grading Scale")
+#     col1, col2, col3, col4 = st.columns(4)
+#     with col1:
+#         bin1 = st.number_input("Lower bound", value=0, disabled=True)
+#     with col2:
+#         bin2 = st.number_input("Medium lower bound", value=45, step=5)
+#     with col3:
+#         bin3 = st.number_input("High lower bound", value=65, step=5)
+#     with col4:
+#         bin4 = st.number_input("Upper bound", value=100, disabled=True)
+
+#     state = st.toggle("Show calculated marks per CO table", value=False)
+#     if state:
+#         st.dataframe(CO_students)
+
+#     weighted_fm_per_CO = Q_fm_df.dot(CO_weights.T)
+#     # print(weighted_fm_per_CO)
+
+#     # co_columns_config = {col: st.column_config.Column(alignment="center") for col in weighted_fm_per_CO.columns}
+
+#     # st.dataframe(weighted_fm_per_CO, hide_index=True, width='content')
+
+#     avg_obtained_per_CO = co_marks.mean(numeric_only=True, axis=0).to_frame().T
+#     # st.dataframe(avg_obtained_per_CO, hide_index=True, width='content')
+
+#     attainment_per_CO = avg_obtained_per_CO.div(weighted_fm_per_CO.iloc[0])
+#     # print(attainment_df)
+    
+    
+#     # st.dataframe(weighted_fm_per_CO, hide_index=True, width='content')
+#     # st.dataframe(avg_obtained_per_CO, hide_index=True, width='content')
+#     st.caption("Average Attainment % over all students")
+#     st.dataframe(attainment_per_CO * 100, hide_index=True, width='content')
+
+
+#     st.caption("Average Attainment level over all students")
+
+    
+#     bins = [-1.0, bin2/100.0, bin3/100.0, 1.01]
+#     labels = [1, 2, 3]  # Low=1, Medium=2, High=3
+
+#     bucketed_marks_per_CO = co_marks.div(weighted_fm_per_CO.iloc[0]).apply(
+#         lambda col: pd.cut(
+#             col,
+#             bins=bins,
+#             labels=labels,
+#             right=False
+#         ).astype(int)
+#     )
+#     avg_bucketed_marks_per_CO = bucketed_marks_per_CO.mean(numeric_only=True, axis=0).to_frame().T
+#     st.dataframe(avg_bucketed_marks_per_CO, hide_index=True, width='content')
+
+
+#     st.subheader("Evaluation of attainment target")
+#     # Number of students who have attained more than the target (60%)
+#     attainment_target = st.number_input(label="Attainment Target", min_value=10, value=60, max_value=100, step=5)
+
+#     target_df = attainment_per_CO.copy()
+#     target_df[:] = attainment_target
+#     plot_attainment_gap(attainment_per_CO * 100, target_df)
+
+
+#     st.header(f"{display_item_counter.count}. Checking if CO has been attained or not and for Modifying the Target of each CO for future")
+#     st.caption("[This calculation is purely based on Direct Assessment]")
+
+#     target_co_marks_tmp = co_marks.div(weighted_fm_per_CO.iloc[0]) * 100
+#     target_marks_achieved_per_CO = (target_co_marks_tmp >= attainment_target).sum().to_frame().T
+#     # print()
+#     total_students = len(target_co_marks_tmp)
+#     st.caption(f"P = Number of students who have scored more than the target ({attainment_target}%)")
+#     st.dataframe(target_marks_achieved_per_CO, hide_index=True, width='content')
+
+#     # print(total_students)
+#     target_marks_achieved_per_CO_percentage = target_marks_achieved_per_CO / total_students * 100
+#     st.caption("Percentage of students who have achieved the target = (P/total_students)*100")
+#     st.dataframe(target_marks_achieved_per_CO_percentage, hide_index=True, width='content')
+
+#     st.caption(f"Attainment Level (3 for >{attainment_target+20}%, 2 for >{attainment_target+10}%, 1 for> {attainment_target}%)")
+#     target_attainment_level_bins = [0, attainment_target, attainment_target+10, attainment_target+20, 1000]
+#     # print(target_marks_achieved_per_CO_percentage)
+#     bucketed_target_marks_achieved_per_CO = target_marks_achieved_per_CO_percentage.apply(
+#         lambda col: pd.cut(
+#             col,
+#             bins=target_attainment_level_bins,
+#             labels=[0, 1, 2, 3],
+#             right=False
+#         ).astype(int)
+#     )
+#     st.dataframe(bucketed_target_marks_achieved_per_CO, hide_index=True, width='content')
+
+
+#     st.header(f"{display_item_counter.count}. Final Attainment for each Course")
+#     st.caption("Enter Student feedback from ERP for Indirect CO Attainment")
+#     indirect_CO_st_cols = st.columns(5)
+#     feedback = {}
+#     CO_names = avg_bucketed_marks_per_CO.columns
+#     for i, col in enumerate(indirect_CO_st_cols, start=1):
+#         with col:
+#             feedback[CO_names[i-1]] = st.number_input(
+#                 CO_names[i-1],
+#                 min_value=0.0,
+#                 max_value=5.0,
+#                 value=2.5,
+#                 step=0.25,
+#                 key=f"student_feedback_{CO_names[i-1]}"
+#             )
+
+#     feedback_df = pd.DataFrame(feedback, index=[0])
+#     final_attainment = avg_bucketed_marks_per_CO * 0.7 + feedback_df * 0.3
+
+#     # CO Attainment Level=70%*A+30%*B
+#     st.caption("Final Attainment Level: 70% * direct + 30% indirect")
+#     st.dataframe(final_attainment, hide_index=True, width='content')
+    
+#     # return True
+#     st.session_state.CO_attainment = True
 
     
 
@@ -696,23 +795,22 @@ def gen_front_end():
     # st.title("CO-PO Attainment Calculator: Data Ingestion")
 
     # File upload widget
-    uploaded_file = st.file_uploader("Upload Course File (PDF)", type="pdf")
+    uploaded_course_file = st.file_uploader("Upload Course File (PDF)", type="pdf")
 
-    if uploaded_file is not None:
+    if uploaded_course_file is not None:
         with st.spinner("Extracting tables..."):
             # Force a quick frontend refresh so the spinner renders
             time.sleep(0.1) 
             
 
-            course_info, mapping_data, eval_df, marks_tables_df = extract_info_from_pdf_tables(uploaded_file)
-            
+            course_info, mapping_data, eval_df, marks_tables_df = extract_info_from_pdf_tables(uploaded_course_file)
 
+            
             # --- Display Results ---
             st.header(f"{display_item_counter.count}. Course Information")
             st.json(course_info)
 
-            st.header(f"{display_item_counter.count}. CO-PO/PSO Mapping")
-            display_CO_PO_mapping_data(mapping_data)
+            
 
             # st.header("3. Evaluation Methodology")
             # if eval_df is not None:
@@ -726,9 +824,17 @@ def gen_front_end():
                 # Combine the tables from multiple pages into one continuous dataframe
                 # final_internal_marks_df = pd.concat(marks_tables, ignore_index=True)
                 final_internal_marks_df = marks_tables_df
-                
+
                 # Display how many records were extracted
                 st.success(f"Successfully extracted {len(final_internal_marks_df)} student records.")
+
+                re_uploaded_file = st.file_uploader("Upload Cleaned Course File (csv) to replace the marks", type="csv")
+                if re_uploaded_file:
+                    final_internal_marks_df = pd.read_csv(re_uploaded_file)
+                    st.success(f"Successfully replaced {len(final_internal_marks_df)} student records.")
+
+                                
+                                
                 
                 show_table_internal = st.toggle("Show Mapping table", value=False, key='internal_marks')
                 if show_table_internal:
@@ -767,6 +873,10 @@ def gen_front_end():
 
     st.header(f"{display_item_counter.count}. Question-wise CO Mapping")
 
+    # co_json_file_upload = st.file_uploader("Upload CO mapping (JSON)", type='json')
+    # if co_json_file_upload:
+
+
     CO_names = sorted(mapping_data['mapping'].index.tolist())
 
     st.subheader("Internal Marks")
@@ -788,6 +898,8 @@ def gen_front_end():
     if st.button("Save", type="primary", width='stretch'):
         Q_CO = internal_Q_CO | end_sem_Q_CO
         st.session_state.Q_CO = Q_CO
+        st.session_state.end_sem_Q_CO = end_sem_Q_CO
+        st.session_state.internal_Q_CO = internal_Q_CO
     
 
     if "Q_CO" in st.session_state:
@@ -796,16 +908,120 @@ def gen_front_end():
     if "Q_CO_success" in st.session_state:
         st.header(f"{display_item_counter.count}. Student CO Attainment")
         
+        st.caption("Attainment Grading Scale")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            bin1 = st.number_input("Lower bound", value=0, disabled=True)
+        with col2:
+            bin2 = st.number_input("Medium lower bound", value=45, step=5)
+        with col3:
+            bin3 = st.number_input("High lower bound", value=65, step=5)
+        with col4:
+            bin4 = st.number_input("Upper bound", value=100, disabled=True)
+        # attainment_bins = [-1.0, bin2/100.0, bin3/100.0, 1.01]
+        attainment_bins = [-1, bin2, bin3, 101]
+        attainment_bins_labels = [1, 2, 3]  # Low=1, Medium=2, High=3
+        
+            
+        
         with st.spinner("Calculating CO Attainment..."):
             time.sleep(0.1) # UI refresh
 
-            calculate_CO_attainment(st.session_state.Q_CO, final_internal_marks_df, filtered_end_sem_df)
+            # calculate_CO_attainment(st.session_state.Q_CO, final_internal_marks_df, filtered_end_sem_df)
+
             
-    
+            final_internal_marks_df = final_internal_marks_df.rename(columns={'Roll No.': 'Roll No'}).drop(columns=['Student Name'], errors='ignore')
+            end_sem_marks_df = filtered_end_sem_df.drop(columns=['Sr no. ', 'Student Name'], errors='ignore')
+        
+            internal_attainment_info = calculate_CO_attainment_separately(internal_Q_CO, final_internal_marks_df, attainment_bins, attainment_bins_labels)
+            endsem_attainment_info = calculate_CO_attainment_separately(end_sem_Q_CO, end_sem_marks_df, attainment_bins, attainment_bins_labels)
+            
+            st.caption("Average Attainment % over all students")
+            avg_attainment_percentage = pd.concat([internal_attainment_info[0], endsem_attainment_info[0]]).mean().to_frame().T
+            st.dataframe(avg_attainment_percentage, hide_index=True, width='content')
+
+            st.caption("Average Attainment level over all students")
+            avg_attainment_level = pd.concat([internal_attainment_info[1], endsem_attainment_info[1]]).mean().to_frame().T
+            st.dataframe(avg_attainment_level, hide_index=True, width='content')
+
+            st.subheader("Evaluation of attainment target")
+            # Number of students who have attained more than the target (60%)
+            attainment_target = st.number_input(label="Attainment Target", min_value=10, value=60, max_value=100, step=5, width=300)
+        
+            target_df = avg_attainment_percentage.copy()
+            target_df[:] = attainment_target
+            plot_attainment_gap(avg_attainment_percentage, target_df)
+
+            st.header(f"{display_item_counter.count}. Checking if CO has been attained or not and for Modifying the Target of each CO for future")
+            st.caption("[This calculation is purely based on Direct Assessment]")
+            # both internal and end sem are 50/50; weighted sum is just simple avg.
+            # info[2] = attainment_per_CO_per_student
+            target_co_marks_tmp = (internal_attainment_info[2] + endsem_attainment_info[2]) / 2
+            target_marks_achieved_per_CO = (target_co_marks_tmp > attainment_target).sum().to_frame().T
+            total_students = len(target_co_marks_tmp)
+            print("rathi", target_co_marks_tmp)
+            st.caption(f"P = Number of students who have scored more than the target ({attainment_target}%)")
+            st.dataframe(target_marks_achieved_per_CO, hide_index=True, width='content')
+            target_marks_achieved_per_CO_percentage = target_marks_achieved_per_CO / total_students * 100
+            st.caption("Percentage of students who have achieved the target = (P/total_students)*100")
+            st.dataframe(target_marks_achieved_per_CO_percentage, hide_index=True, width='content')
+
+            st.caption(f"Attainment Level (3 for >{attainment_target+20}%, 2 for >{attainment_target+10}%, 1 for> {attainment_target}%)")
+            target_attainment_level_bins = [0, attainment_target, attainment_target+10, attainment_target+20, 1000]
+            # print(target_marks_achieved_per_CO_percentage)
+            bucketed_target_marks_achieved_per_CO = target_marks_achieved_per_CO_percentage.apply(
+                lambda col: pd.cut(
+                    col,
+                    bins=target_attainment_level_bins,
+                    labels=[0, 1, 2, 3],
+                    right=False
+                ).astype(int)
+            )
+            st.dataframe(bucketed_target_marks_achieved_per_CO, hide_index=True, width='content')
+
+            st.header(f"{display_item_counter.count}. Final Attainment for each Course")
+            st.caption("Enter Student feedback from ERP for Indirect CO Attainment")
+            indirect_CO_st_cols = st.columns(5)
+            feedback = {}
+            CO_names = avg_attainment_level.columns
+            for i, col in enumerate(indirect_CO_st_cols, start=1):
+                with col:
+                    feedback[CO_names[i-1]] = st.number_input(
+                        CO_names[i-1],
+                        min_value=0.0,
+                        max_value=5.0,
+                        value=2.5,
+                        step=0.25,
+                        key=f"student_feedback_{CO_names[i-1]}",
+                        width=200
+                    )
+        
+            feedback_df = pd.DataFrame(feedback, index=[0])
+            feedback_button = st.button("Calculate", width=500, type="primary")
+            if feedback_button:
+                if feedback_df.iloc[0].min() == 0.0:
+                    st.error("Enter all non-zero feedback scores")
+                    # st.rerun()
+                else:
+                    final_attainment = avg_attainment_level * 0.7 + feedback_df * 0.3
+            
+                    # CO Attainment Level=70%*A+30%*B
+                    st.caption("Final Attainment Level: 70% * direct + 30% indirect")
+                    st.dataframe(final_attainment, hide_index=True, width='content')
+                    
+                    # return True
+                    st.session_state.CO_attainment = final_attainment
+            # else:
+            #     del st.session_state.CO_attainment
+            
+
     if "CO_attainment" in st.session_state:
         st.header(f"{display_item_counter.count}. Direct PO/PSO Assessment")
-        st.warning("PENDING")
+        # st.warning("PENDING")
         # CO-PO mapping data from course file may be inaccurate
+
+        st.subheader("CO-PO/PSO Mapping")
+        process_CO_PO_mapping_data(mapping_data, st.session_state.CO_attainment)
 
 class Counter:
     def __init__(self):
