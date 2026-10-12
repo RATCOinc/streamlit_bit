@@ -1017,7 +1017,7 @@ def gen_front_end():
 
     if "CO_attainment" in st.session_state:
         st.header(f"{display_item_counter.count}. Direct PO/PSO Assessment")
-        # st.warning("PENDING")
+        st.warning("Partly Done")
         # CO-PO mapping data from course file may be inaccurate
 
         st.subheader("CO-PO/PSO Mapping")
